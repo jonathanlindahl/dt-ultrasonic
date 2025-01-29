@@ -20,7 +20,7 @@
 #include "dt_ultrasonic.h"
 
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Parse device tree for a specific device and its properties");
+MODULE_DESCRIPTION("Trigger an ultrasonic sensor using gpios configured with device tree");
 
 static ktime_t time_start;
 static ktime_t time_end;
