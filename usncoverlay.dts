@@ -1,0 +1,19 @@
+/dts-v1/;
+/plugin/;
+
+/{
+    compatible = "brcm,bcm2835";
+    fragment@0 {
+        target-path = "/";
+        __overlay__ {
+            dt_ultrasonic {
+                compatible = "me,dt_ultrasonic";
+                input-gpio = <&gpio 24 0>; // gpio 24 as input
+                output-gpio = <&gpio 17 1>; // gpio 17 as output
+                interrupts = <24 (2 | 1)>;
+                interrupt-parent = <&gpio>;
+                status = "okay";
+            };
+        };
+    };
+};
