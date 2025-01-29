@@ -31,6 +31,7 @@ dev_t dev = 0;
 static struct class *dev_class;
 static struct cdev usnc_cdev;
 
+// TODO add prototypes to header
 // prototypes
 static int dt_probe(struct platform_device *pdev);
 static int dt_remove(struct platform_device *pdev);
@@ -39,7 +40,16 @@ static int usnc_open(struct inode *inode, struct file *file);
 static int usnc_release(struct inode *inode, struct file *file);
 static ssize_t usnc_read(struct file *filp, char __user *buf, size_t len, loff_t *off);
 static ssize_t usnc_write(struct file *filp, const char *buf, size_t len, loff_t *off);
+static long int usnc_ioctl(struct file *file, unsigned cmd, unsigned long arg);
+
 static irqreturn_t handle_gpio_irq(int irq, void *dev_id);
+
+// ioctl
+int32_t ioctl_global = 0;
+#define MAJOR_NUM 236
+#define IOCTL_WR_VALUE _IOW(MAJOR_NUM, 0, char *)
+#define IOCTL_RD_VALUE _IOR(MAJOR_NUM, 1, char *)
+void ioctl_trigger(unsigned long *arg);
 
 // fops structure
 static struct file_operations fops = {
@@ -48,12 +58,13 @@ static struct file_operations fops = {
     .write = usnc_write,
     .open = usnc_open,
     .release = usnc_release,
+    .unlocked_ioctl = usnc_ioctl,
 };
 
 static struct of_device_id my_driver_ids[] = {
     {
         .compatible = "me,dt_ultrasonic",
-    }, { /* sentinel */}
+    }, { /* sentinel */ }
 };
 
 // assign compatible device list to the module
@@ -103,6 +114,64 @@ static int usnc_release(struct inode *inode, struct file *file)
     return 0;
 }
 
+static long int usnc_ioctl(struct file *file, unsigned cmd, unsigned long arg)
+{
+    switch (cmd) {
+        case IOCTL_WR_VALUE:
+            if (copy_from_user(&ioctl_global, (int32_t *) arg, sizeof(ioctl_global))) {
+                printk("dt_ultrasonic: error copying bytes FROM user\n");
+            } else {
+                printk("dt_ultrasonic: ioctl write: copied FROM user\n");
+                ioctl_trigger(&arg);
+            }
+            break;
+        case IOCTL_RD_VALUE:
+            int len = snprintf(NULL, 0, "%d", ioctl_global);
+            char to_copy[100] = { 0 };
+            snprintf(to_copy, len + 1, "%d", ioctl_global);
+            if (copy_to_user((char __user *) arg, to_copy, len + 1)) {
+                printk("dt_ultrasonic: usnc_ioctl: error copying bytes TO user\n");
+            } else {
+                printk("dt_ultrasonic: ioctl read: copied TO user\n");
+            }
+            break;
+    }
+    return 0;
+}
+
+void ioctl_trigger(unsigned long *arg)
+{
+    int counter;
+    unsigned long long result;
+    int32_t result_cm;
+
+    pr_info("dt_ultrasonic: ioctl: starting trigger\n");
+
+    // trigger ultrasonic pulse
+    gpiod_set_value(usnc_out, 1);
+    udelay(10);
+    gpiod_set_value(usnc_out, 0);
+
+    valid_value = 0;
+
+    counter = 0;
+    while (valid_value == 0) {
+        // out of range
+        if (++counter > 35200) {
+            pr_info("dt_ultrasonic: ioctl trigger: counter timeout\n");
+        }
+        udelay(1);
+    }
+
+    result = ktime_to_us(ktime_sub(time_end, time_start));
+    pr_info("dt_ultrasonic: ioctl trigger: RESULT: %lld\n", result);
+    // calculate measurement in cm:
+    result_cm = (int32_t)div_u64(result, 58);
+    pr_info("dt_ultrasonic: ioctl trigger: RESULT CM: %d\n", result_cm);
+    ioctl_global = result_cm;
+    pr_info("dt_ultrasonic: ioctl trigger: ioctl_global: %d\n", ioctl_global);
+}
+
 static ssize_t usnc_read(struct file *filp, char __user *buf, size_t len, loff_t *off)
 {
     uint8_t gpio_state = 0;
@@ -115,9 +184,11 @@ static ssize_t usnc_read(struct file *filp, char __user *buf, size_t len, loff_t
     // write to user
     len = 1;
     if (copy_to_user(buf, &gpio_in_state, len) > 0)
-        pr_err("dt_ultrasonic: ERROR: not all bytes have been copied to user\n");
+        pr_err("dt_ultrasonic: error copying bytes TO user\n");
 
-    pr_info("dt_ultrasonic: read: gpio 17 out %d gpio 24 in: %d\n", gpio_state, gpio_in_state);
+    pr_info(
+        "dt_ultrasonic: read: gpio 17 out %d gpio 24 in: %d\n", gpio_state, gpio_in_state
+    );
 
     return 0;
 }
@@ -130,7 +201,7 @@ static ssize_t usnc_write(
     unsigned long long result;
 
     if (copy_from_user(rec_buf, buf, len) > 0)
-        pr_err("dt_ultrasonic: ERROR: not all bytes have been copied from user\n");
+        pr_err("dt_ultrasonic: error copying bytes FROM user\n");
 
     if (rec_buf[0] == '1') {
         pr_info("dt_ultrasonic: write: starting trigger\n");
@@ -255,7 +326,7 @@ static int __init my_init(void)
         pr_err("dt_ultrasonic: cannot allocate major number\n");
         goto r_unreg;
     }
-    printk("major: %d minor: %d\n", MAJOR(dev), MINOR(dev));
+    printk("dt_ultrasonic: major: %d minor: %d\n", MAJOR(dev), MINOR(dev));
 
     // create cdev structure
     cdev_init(&usnc_cdev, &fops);
