@@ -12,6 +12,13 @@ static long int usnc_ioctl(struct file *file, unsigned cmd, unsigned long arg);
 
 static irqreturn_t handle_gpio_irq(int irq, void *dev_id);
 
+// userspace registration
+#define REGISTER_UAPP _IO('R', 'g')
+
+// signals
+#define SIGNR 44
+void usnc_send_signal(void);
+
 #define MAJOR_NUM 236
 #define IOCTL_WR_VALUE _IOW(MAJOR_NUM, 0, char *)
 #define IOCTL_RD_VALUE _IOR(MAJOR_NUM, 1, char *)

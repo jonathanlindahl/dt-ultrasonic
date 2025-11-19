@@ -1,40 +1,54 @@
-#include <linux/module.h>
-#include <linux/init.h>
-#include <linux/mod_devicetable.h>
-#include <linux/property.h>
-#include <linux/platform_device.h>
-#include <linux/of_device.h>
+#include <linux/cdev.h>
+#include <linux/delay.h>
+#include <linux/device.h>
+#include <linux/err.h>
+#include <linux/fs.h>
 #include <linux/gpio/consumer.h>
+#include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/ioctl.h>
 #include <linux/kernel.h>
 #include <linux/kdev_t.h>
-#include <linux/fs.h>
-#include <linux/cdev.h>
-#include <linux/device.h>
-#include <linux/slab.h>
-#include <linux/delay.h>
-#include <linux/interrupt.h>
-#include <linux/err.h>
-#include <linux/timekeeping.h>
 #include <linux/math64.h>
+#include <linux/mod_devicetable.h>
+#include <linux/module.h>
+#include <linux/of_device.h>
+#include <linux/platform_device.h>
+#include <linux/property.h>
+#include <linux/sched/signal.h>
+#include <linux/slab.h>
+#include <linux/timekeeping.h>
 
 #include "dt_ultrasonic.h"
 
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("Trigger an ultrasonic sensor using gpios configured with device tree");
 
-static ktime_t time_start;
-static ktime_t time_end;
-
-unsigned int gpio_irq_number;
-
-static unsigned int valid_value;
-
+// device variables
 dev_t dev = 0;
 static struct class *dev_class;
 static struct cdev usnc_cdev;
 
+// gpio
+static struct gpio_desc *usnc_out = NULL;
+static struct gpio_desc *usnc_in = NULL;
+
+// irq
+unsigned int gpio_irq_number;
+
+// userspace registration
+static struct task_struct *task = NULL;
+
 // ioctl
 int32_t ioctl_global = 0;
+// TODO add last_measurement variable to compare new value in ioctl_global to
+int32_t last_measurement = 0;
+
+// globals for calculations
+static ktime_t time_start;
+static ktime_t time_end;
+static unsigned int valid_value;
+static unsigned int uapp_signal_mode = 0;
 
 // fops structure
 static struct file_operations fops = {
@@ -65,9 +79,6 @@ static struct platform_driver my_driver = {
     },
 };
 
-static struct gpio_desc *usnc_out = NULL;
-static struct gpio_desc *usnc_in = NULL;
-
 // handle interrupts from gpio input pin 24
 static irqreturn_t handle_gpio_irq(int irq, void *dev_id)
 {
@@ -83,8 +94,27 @@ static irqreturn_t handle_gpio_irq(int irq, void *dev_id)
             valid_value = 1;
         }
     }
+    if (valid_value && uapp_signal_mode)
+        usnc_send_signal();
 
     return IRQ_HANDLED;
+}
+
+void usnc_send_signal()
+{
+    struct siginfo info;
+    printk("dt_ultrasonic: sending signal\n");
+
+    if (task != NULL) {
+        memset(&info, 0, sizeof(info));
+        info.si_signo = SIGNR;
+        info.si_code = SI_QUEUE;
+        info.si_int = (int) ioctl_global;
+
+        // send signal
+        if (send_sig_info(SIGNR, (struct kernel_siginfo *) &info, task) < 0)
+            printk("dt_ultrasonic: error sending signal");
+    }
 }
 
 static int usnc_open(struct inode *inode, struct file *file)
@@ -101,19 +131,32 @@ static int usnc_release(struct inode *inode, struct file *file)
 
 static long int usnc_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
+    // TODO add case for setting uapp_signal_mode
     switch (cmd) {
+        case REGISTER_UAPP:
+            task = get_current();
+            printk("dt_ultrasonic: userspace app with PID %d registered\n", task->pid);
+            break;
         case IOCTL_WR_VALUE:
             if (copy_from_user(&ioctl_global, (int32_t *) arg, sizeof(ioctl_global))) {
                 printk("dt_ultrasonic: error copying bytes FROM user\n");
             } else {
-                printk("dt_ultrasonic: ioctl write: copied FROM user\n");
-                ioctl_trigger(&arg);
+                printk("dt_ultrasonic: ioctl write: copied FROM user: %d\n", ioctl_global);
+                if (ioctl_global == 49)
+                    ioctl_trigger(&arg);
+                // TODO send signal if last measurement is different from ioctl_global
+                if (ioctl_global == 50)
+                    uapp_signal_mode = 1;
+                if (ioctl_global == 51)
+                    uapp_signal_mode = 0;
             }
             break;
         case IOCTL_RD_VALUE:
+            // convert the measurement stored in ioctl_global to string
             int len = snprintf(NULL, 0, "%d", ioctl_global);
             char to_copy[100] = { 0 };
             snprintf(to_copy, len + 1, "%d", ioctl_global);
+
             if (copy_to_user((char __user *) arg, to_copy, len + 1)) {
                 printk("dt_ultrasonic: usnc_ioctl: error copying bytes TO user\n");
             } else {
